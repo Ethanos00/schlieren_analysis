@@ -1,0 +1,23 @@
+
+images:
+  # Used only for JPEG images
+  jpg_gamma: 2.2
+
+calibration:
+
+  # Region of interest in ORIGINAL image pixels
+  roi:
+    x: 2000
+    y: 1000
+    width: 1500
+    height: 1200
+
+  frames:
+    - blade_mm: -865
+      file: "../images/d2/DSC05214.jpg"
+
+    - blade_mm: -500
+      file: "../images/d2/DSC05215.jpg"
+
+    - blade_mm: -400
+      file: "../images/d2/DSC05216.jpg"
