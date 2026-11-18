@@ -58,7 +58,82 @@ def load_calibration_images(config):
 
     return positions, images
 
+# --- Plot average calibration brightnesses ---
 
+def plot_calibration_curve(positions, images):
+
+    # calculate mean brightness of each image
+    mean_brightness = images.mean(axis=(1, 2))
+
+    # create figure
+    plt.figure(figsize = (8,5))
+
+    # plot brightness against position
+    plt.plot(
+        positions,
+        mean_brightness,
+        "o-",
+        color="red",
+        markersize=3,
+        label="Average ROI brightness"
+    )
+
+    plt.xlabel("Knife-edge position (mm)")
+    plt.ylabel("Average image brightness")
+    plt.title("Calibration Image Brightness Curve")
+
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+
+    plt.show()
+
+
+# --- Display all calibration images ---
+
+def display_calibration_images(positions, images):
+
+    # Use a shared brightness scale for all images
+    display_min = np.percentile(images, 1)
+    display_max = np.percentile(images, 99)
+
+    # Prevent invalid display limits
+    if display_max <= display_min:
+        display_max = display_min + 1e-6
+
+    # Create one subplot per calibration image
+    n_images = len(positions)
+
+    fig, axes = plt.subplots(
+        1, n_images,
+        figsize=(4 * n_images, 5),
+        squeeze=False
+    )
+
+    # Display images in blade-position order
+    for i in range(n_images):
+
+        ax = axes[0, i]
+
+        im = ax.imshow(
+            images[i],
+            cmap="gray",
+            vmin=display_min,
+            vmax=display_max
+        )
+
+        ax.set_title(f"Blade: {positions[i]:.3f} mm")
+        ax.axis("off")
+
+    # Shared brightness colorbar
+    fig.colorbar(
+        im,
+        ax=axes.ravel().tolist(),
+        label="Linear Brightness",
+        shrink=0.7
+    )
+
+    plt.show()
 
 # --- Main program ---
 
@@ -87,6 +162,12 @@ def main():
             f"Mean brightness: {brightness:.6f}"
         )
 
+    
+    # Display all cropped calibration images
+    display_calibration_images(positions, images)
+
+    # Plot brightness versus knife-edge position
+    plot_calibration_curve(positions, images)
 
 if __name__ == "__main__":
     main()
