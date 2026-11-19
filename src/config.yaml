@@ -12,7 +12,9 @@ images:
     - {label: lighter, file: ../../knife_cal_imag/day_2/with flame/DSC05219.JPG, heater_reference_C: 40}
 
 calibration:
-  roi: 
+
+  # Region of interest in ORIGINAL image pixels
+  roi:
     x: 2000
     y: 1000
     width: 1500
@@ -23,26 +25,11 @@ calibration:
   minimum_intensity_span: 0.001
   # Capture EVERY calibration image with heater OFF and same camera settings.
   frames:
-    - {blade_um: -865, file: ../../knife_cal_imag/day_2/DSC05214.jpg}
-    - {blade_um: -435, file: ../../knife_cal_imag/day_2/DSC05215.jpg}
-    - {blade_um: -155, file: ../../knife_cal_imag/day_2/DSC05216.jpg}
-    - {blade_um: -15, file: ../../knife_cal_imag/day_2/DSC05217.jpg}
-    - {blade_um: 865, file: ../../knife_cal_imag/day_2/DSC05218.jpg}
-geometry:
-  # VERIFY THESE FOR YOUR OPTICAL SYSTEM! Do not use example values as fact.
-  f_eff_m: 0.46
-  optical_depth_m: 0.01
-  meters_per_pixel: 0.0002
-  # +1/-1 accounts for orientation of knife edge and mirrors.
-  # Determine sign with a known deflector OR an independently understood test.
-  angle_sign: 1
-  # Top rows assumed unaffected by heater, anchored at ambient n.
-  ref_top_rows: 4
-  smooth_sigma_px: 1.0
+    - blade_mm: -865
+      file: "../images/d2/DSC05214.jpg"
 
-physics:
-  pressure_pa: 101325
-  ambient_temp_C: 22
-  K_m3_per_kg: 0.000225
-  R_air_j_per_kgK: 287.05
-  plausible_temp_C: [-20, 200]
+    - blade_mm: -500
+      file: "../images/d2/DSC05215.jpg"
+
+    - blade_mm: -400
+      file: "../images/d2/DSC05216.jpg"
