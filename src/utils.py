@@ -16,10 +16,13 @@ import cv2
 
 def load_config(config_path="config.yaml"):
 
-    # Convert the filename into a Path object
-    config_path = Path(config_path)
+    # Get directory containing utils.py
+    src_dir = Path(__file__).resolve().parent
 
-    # Open and read the YAML file
+    # Locate config.yaml inside src/
+    config_path = src_dir / config_path
+
+    # Read configuration
     with open(config_path, "r") as file:
         config = yaml.safe_load(file)
 

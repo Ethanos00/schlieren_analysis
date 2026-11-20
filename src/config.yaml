@@ -1,35 +1,118 @@
 
-output_dir: output
-images:
-  #reference should be at same height as heated images
-  reference: ../../knife_cal_imag/day_2/DSC05217.jpg
-  #setting to 2.2 for jpg workaround
-  jpg_gamma: 2.2
-  # For ordinary JPEGs, set approx_gamma: 2.2 only as a rough workaround.
-  # Omit for genuinely linear images. RAW -> linear TIFF preferred.
+# ==========================================
+# SCHLIEREN EXPERIMENT CONFIGURATION
+# ==========================================
 
+# --- Output settings ---
+
+output:
+  analysis_dir: output/analysis
+
+
+# --- Image settings ---
+
+images:
+
+  # Reference image (heater OFF)
+  reference: "../images/d3/calibrate/DSC05240.JPG"
+
+  # Approximate JPEG gamma correction
+  jpg_gamma: 2.2
+
+  # Heated images
   heated:
-    - {label: lighter, file: ../../knife_cal_imag/day_2/with flame/DSC05219.JPG, heater_reference_C: 40}
+    - label: lighter
+      file: "../images/d3/heated/DSC05242.JPG"
+      heater_reference_C: 760
+
+
+# --- Knife-edge calibration ---
 
 calibration:
 
-  # Region of interest in ORIGINAL image pixels
+  # Saved calibration data
+  results_file: output/calibration/calibration.npz
+
+  # ROI coordinates in original image pixels
   roi:
-    x: 2000
-    y: 1000
-    width: 1500
-    height: 1200
+    x: 2543
+    y: 199
+    width: 2369
+    height: 2248
 
+  # Reference blade position (mm)
+  reference_blade_mm: 115.93
 
-  reference_blade_um: -15
+  # Pixel calibration quality settings
   minimum_intensity_span: 0.001
-  # Capture EVERY calibration image with heater OFF and same camera settings.
+  max_relative_fit_error: 0.05
+
+  # Calibration photographs (heater OFF)
   frames:
-    - blade_mm: -865
-      file: "../images/d2/DSC05214.jpg"
+    - blade_mm: 113.95
+      file: "../images/d3/calibrate/DSC05232.JPG"
 
-    - blade_mm: -500
-      file: "../images/d2/DSC05215.jpg"
+    - blade_mm: 114.56
+      file: "../images/d3/calibrate/DSC05233.JPG"
 
-    - blade_mm: -400
-      file: "../images/d2/DSC05216.jpg"
+    - blade_mm: 115.64
+      file: "../images/d3/calibrate/DSC05234.JPG"
+
+    - blade_mm: 116.93
+      file: "../images/d3/calibrate/DSC05235.JPG"
+
+    - blade_mm: 117.29
+      file: "../images/d3/calibrate/DSC05236.JPG"
+
+    - blade_mm: 117.59
+      file: "../images/d3/calibrate/DSC05237.JPG"
+
+    - blade_mm: 117.28
+      file: "../images/d3/calibrate/DSC05238.JPG"
+
+    - blade_mm: 116.62
+      file: "../images/d3/calibrate/DSC05239.JPG"
+
+    - blade_mm: 115.93
+      file: "../images/d3/calibrate/DSC05240.JPG"
+
+
+# --- Optical geometry ---
+
+geometry:
+
+  # Effective focal length (m)
+  f_eff_m: 0.46
+
+  # Effective depth of heated air along optical path (m)
+  optical_depth_m: 0.01
+
+  # Object-plane physical scale per original pixel (m/px)
+  meters_per_pixel: 0.0002
+
+  # Optical deflection orientation
+  angle_sign: 1
+
+
+# --- Physical constants ---
+
+physics:
+
+  pressure_pa: 101325
+  ambient_temp_C: 22
+  K_m3_per_kg: 0.000225
+  R_air_j_per_kgK: 287.05
+
+
+# --- Analysis settings ---
+
+analysis:
+
+  # Gaussian smoothing
+  smooth_sigma_px: 1.0
+
+  # Top rows assumed to contain ambient air
+  ref_top_rows: 4
+
+  # Minimum absolute usable calibration slope
+  min_abs_slope_per_mm: 1.0e-10
