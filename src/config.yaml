@@ -12,11 +12,12 @@ images:
     - {label: lighter, file: ../../knife_cal_imag/day_2/with flame/DSC05219.JPG, heater_reference_C: 40}
 
 calibration:
-  roi: 
-    x: 2000
-    y: 1000
-    width: 1500
-    height: 1200
+  # Region of interest in ORIGINAL image pixels
+  roi:
+    x: 2543
+    y: 199
+    width: 2369
+    height: 2248
 
 
   reference_blade_um: -15
