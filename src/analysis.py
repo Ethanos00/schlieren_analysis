@@ -2,12 +2,10 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 
-
 def derive_gradient(
     heated: np.ndarray,           # [2D float array, (H, W)] Grayscale image (0.0 to 1.0) with heat source ON
     reference: np.ndarray,        # [2D float array, (H, W)] Baseline grayscale image (0.0 to 1.0) with heat source OFF
-    slope: np.ndarray,            # [2D float array, (H, W)] Pixelwise calibration slope: dI / ds_blade (intensity / um)
-    valid: np.ndarray,            # [2D bool array, (H, W)] Mask of pixels that passed calibration linearity/saturation checks
+    slope: np.ndarray,            # [2D float array, (H, W)] Pixelwise calibration slope: dI / ds_blade (intensity / mm)
     f_eff_m: float,               # [scalar, meters] Effective focal length of the schlieren mirror/lens before the knife edge
     optical_depth_m: float,       # [scalar, meters] Length (L) of the heat plate along the optical beam axis
     n_ambient: float,             # [scalar, dimensionless] Refractive index (n_0) of undisturbed room air (~1.00027)
@@ -15,7 +13,7 @@ def derive_gradient(
 ) -> tuple[
     np.ndarray,                   # delta_I:      [2D float array, (H, W)] Raw brightness change (heated - reference)
     np.ndarray,                   # delta_spot_m: [2D float array, (H, W)] Inferred light-spot shift at knife edge (meters)
-    np.ndarray                    # g:            [2D float array, (H, W)] Vertical refractive index gradient dn/dy (1 / meters)
+    np.ndarray                    # grad:         [2D float array, (H, W)] Vertical refractive index gradient dn/dy (1 / meters)
 ]:
     # We know that theta_y ~= (L/n_0) * dn/dy
     # Since n_0~=1 and theta_y = \Delta s_diff/f_eff = (-\Delta s_blade)/f_eff
@@ -29,8 +27,10 @@ def derive_gradient(
     # Finds the brightness difference
     delta_I = heated - reference
 
-    # Finds the diffracted displacement 
-    delta_spot_m = (1e-6) * (-delta_I / np.where(valid, slope, np.nan))
+    # Finds the diffracted displacement (1e-3 converts mm from calibration slope into meters)
+    # Ignore valid mask; protect only against division by zero if slope == 0
+    safe_slope = np.where(np.abs(slope) > 1e-12, slope, np.nan)
+    delta_spot_m = (1e-3) * (-delta_I / safe_slope)
 
     # Small angle approximation (deflection angle theta_y = delta_spot / f_eff)
     theta = angle_sign * delta_spot_m / f_eff_m
@@ -40,51 +40,40 @@ def derive_gradient(
 
     # NaN safe Gaussian smoothing (normalized convolution) so NaNs don't bleed into valid neighbors
     if smooth_sigma_px > 0:
-        weights = gaussian_filter(valid.astype(float), smooth_sigma_px)
+        finite_mask = np.isfinite(grad).astype(float)
+        weights = gaussian_filter(finite_mask, smooth_sigma_px)
         gf = gaussian_filter(np.nan_to_num(grad, nan=0.0), smooth_sigma_px)
         grad = np.where(weights > 0.1, gf / np.maximum(weights, 1e-9), np.nan)
-
-    # Ensure originally invalid calibration pixels remain masked as NaN
-    grad[~valid] = np.nan
 
     return delta_I, delta_spot_m, grad
 
 
-# Simple trapezoidal rule
-def integrate_from_top(
+def integrate_from_bottom(
     dn_dy: np.ndarray,        # [2D float array, (H, W)] Vertical gradient from Step 1 (1 / meters)
     meters_per_pixel: float,  # [scalar, meters/px] Physical height of 1 pixel at the test section
     n_ambient: float,         # [scalar, dimensionless] Refractive index of undisturbed room air (~1.00027)
-    ref_top_rows: int         # [scalar, int] Number of top rows assumed to be ambient air (e.g. 4)
+    ref_bottom_rows: int      # [scalar, int] Number of bottom rows assumed to be ambient air (e.g. 4)
 ) -> np.ndarray:              # returns n_out: [2D float array, (H, W)] Refractive index field
     H, W = dn_dy.shape
-    if ref_top_rows >= H:
-        raise ValueError("ref_top_rows must be less than image height")
+    if ref_bottom_rows >= H:
+        raise ValueError("ref_bottom_rows must be less than image height")
 
-    # Create an empty (H, W) array filled with NaNs
+    # Replace NaNs with 0.0 during integration so dark border pixels outside the circular mirror
+    # keep n = n_ambient instead of turning the entire column into NaN
+    g_clean = np.nan_to_num(dn_dy, nan=0.0)
+
     n_out = np.full((H, W), np.nan, dtype=float)
+    anchor_row = H - ref_bottom_rows
+    n_out[anchor_row:] = n_ambient
 
-    # Anchor the boundary condition at the bottom of the top reference zone
-    n_out[ref_top_rows - 1] = n_ambient
+    # March upward row-by-row across all W columns simultaneously
+    for row in range(anchor_row - 1, -1, -1):
+        a = g_clean[row + 1]
+        b = g_clean[row]
+        n_out[row] = n_out[row + 1] + 0.5 * (a + b) * meters_per_pixel
 
-    # March downward row-by-row across all W columns simultaneously
-    for row in range(ref_top_rows, H):
-        a = dn_dy[row - 1]    # Gradient across the previous row (1D array of length W)
-        b = dn_dy[row]        # Gradient across the current row (1D array of length W)
-        prev = n_out[row - 1] # Already-computed refractive index from the row above
-
-        # Only integrate where previous n and both gradients are valid numbers (not NaN)
-        # subtracts average of this row and prev gradient averaged 
-        # (subtract instead of add because going downward so step in negative direction)
-        valid_step = np.isfinite(prev) & np.isfinite(a) & np.isfinite(b)
-        n_out[row] = np.where(
-            valid_step,
-            prev - 0.5 * (a + b) * meters_per_pixel,
-            np.nan
-        )
-
-    # Fill the top reference rows themselves with n_ambient
-    n_out[:ref_top_rows] = n_ambient
+    # Mask out pixels outside the valid circular mirror region after integrating
+    n_out[~np.isfinite(dn_dy)] = np.nan
 
     return n_out
 
