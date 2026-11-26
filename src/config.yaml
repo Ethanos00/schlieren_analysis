@@ -14,7 +14,7 @@ output:
 images:
 
   # Reference image (heater OFF)
-  reference: "../images/d3/calibrate/DSC05240.JPG"
+  reference: "../images/d4/heated/DSC05262.JPG"
 
   # Approximate JPEG gamma correction
   jpg_gamma: 2.2
@@ -22,8 +22,8 @@ images:
   # Heated images
   heated:
     - label: lighter
-      file: "../images/d3/heated/DSC05242.JPG"
-      heater_reference_C: 760
+      file: "../images/d4/heated/DSC05263.JPG"
+      heater_reference_C: 56
 
 
 # --- Knife-edge calibration ---
@@ -35,13 +35,13 @@ calibration:
 
   # ROI coordinates in original image pixels
   roi:
-    x: 2543
-    y: 199
-    width: 2369
-    height: 2248
+    x: 1817
+    y: 276
+    width: 2629
+    height: 476
 
   # Reference blade position (mm)
-  reference_blade_mm: 115.93
+  reference_blade_mm: 127.18
 
   # Pixel calibration quality settings
   minimum_intensity_span: 0.001
@@ -49,32 +49,32 @@ calibration:
 
   # Calibration photographs (heater OFF)
   frames:
-    - blade_mm: 113.95
-      file: "../images/d3/calibrate/DSC05232.JPG"
+    - blade_mm: 125.54
+      file: "../images/d4/calibrate/DSC05253.JPG"
 
-    - blade_mm: 114.56
-      file: "../images/d3/calibrate/DSC05233.JPG"
+    - blade_mm: 127.01
+      file: "../images/d4/calibrate/DSC05255.JPG"
 
-    - blade_mm: 115.64
-      file: "../images/d3/calibrate/DSC05234.JPG"
+    - blade_mm: 127.73
+      file: "../images/d4/calibrate/DSC05257.JPG"
 
-    - blade_mm: 116.93
-      file: "../images/d3/calibrate/DSC05235.JPG"
+    - blade_mm: 127.81
+      file: "../images/d4/calibrate/DSC05258.JPG"
 
-    - blade_mm: 117.29
-      file: "../images/d3/calibrate/DSC05236.JPG"
+    - blade_mm: 128.36
+      file: "../images/d4/calibrate/DSC05259.JPG"
 
-    - blade_mm: 117.59
-      file: "../images/d3/calibrate/DSC05237.JPG"
+    - blade_mm: 127.14
+      file: "../images/d4/calibrate/DSC05260.JPG"
 
-    - blade_mm: 117.28
-      file: "../images/d3/calibrate/DSC05238.JPG"
+    - blade_mm: 127.26
+      file: "../images/d4/calibrate/DSC05261.JPG"
 
-    - blade_mm: 116.62
-      file: "../images/d3/calibrate/DSC05239.JPG"
+    - blade_mm: 127.18
+      file: "../images/d4/heated/DSC05262.JPG"
 
-    - blade_mm: 115.93
-      file: "../images/d3/calibrate/DSC05240.JPG"
+
+
 
 
 # --- Optical geometry ---
@@ -85,13 +85,14 @@ geometry:
   f_eff_m: 0.46
 
   # Effective depth of heated air along optical path (m)
-  optical_depth_m: 0.01
+  optical_depth_m: 0.033
 
   # Object-plane physical scale per original pixel (m/px)
-  meters_per_pixel: 0.0002
+  # meters_per_pixel: 0.0002
+  meters_per_pixel: 0.00008
 
   # Optical deflection orientation
-  angle_sign: 1
+  angle_sign: -1
 
 
 # --- Physical constants ---
@@ -116,3 +117,13 @@ analysis:
 
   # Minimum absolute usable calibration slope
   min_abs_slope_per_mm: 1.0e-10
+
+  # Ignore the calibration validity mask for visualization
+  use_calibration_mask: false
+
+  # Still reject zero or extremely small slopes
+  min_abs_slope_per_mm: 0.0001
+
+  min_reference_intensity: 0.002
+
+  ambient_row: 450

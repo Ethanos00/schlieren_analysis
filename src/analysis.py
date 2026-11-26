@@ -1,12 +1,12 @@
-# ==========================================
-# QUANTITATIVE SCHLIEREN ANALYSIS
-# ==========================================
-# Run from any directory:
-#   python src/analysis.py
-#   python src/analysis.py --config src/config.yaml
-# Assumes analysis.py and config.yaml are in project_root/src/.
-# Relative paths in config.yaml are resolved from the PROJECT ROOT.
+"""Quantitative schlieren analysis from calibration.npz.
 
+Place as project/src/analysis.py alongside config.yaml and utils.py.
+Run: python analysis.py, or python main.py analysis.
+
+NOTE: One knife edge measures one component of the path-integrated
+refractive-index gradient. The temperature reconstruction depends on
+calibration, geometric assumptions, and a known ambient boundary.
+"""
 from pathlib import Path
 import argparse
 import warnings
@@ -19,239 +19,236 @@ from scipy.ndimage import gaussian_filter
 from utils import load_image, crop_image
 
 
-def derive_gradient(
-    heated: np.ndarray,
-    reference: np.ndarray,
-    slope: np.ndarray,                 # dI / d(blade position in mm)
-    valid: np.ndarray,
-    f_eff_m: float,
-    optical_depth_m: float,
-    n_ambient: float,
-    smooth_sigma_px: float,
-    angle_sign: int = 1,
-    min_abs_slope: float = 1e-10,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Convert brightness difference to spot shift (m) and dn/dy (1/m).
+def path_from(value, base):
+    p = Path(value)
+    return p if p.is_absolute() else (base / p).resolve()
 
-    Assumes the camera's intensity response is locally linear around the
-    selected reference blade position. A positive blade shift is assumed to
-    be the negative of the optical spot shift. Set angle_sign with a known
-    optical deflection test (not by guessing the desired temperature sign).
+
+def describe(name, array):
+    vals = np.asarray(array)
+    finite = vals[np.isfinite(vals)]
+    if not finite.size:
+        print(f"  {name}: no finite pixels")
+        return
+    p01, p50, p99 = np.percentile(finite, [1, 50, 99])
+    print(f"  {name}: finite={100 * finite.size / vals.size:.3f}% "
+          f"p01={p01:.5g} median={p50:.5g} p99={p99:.5g}")
+
+
+def load_calibration(npz_path, yaml_roi, yaml_reference_mm=None):
+    """Read required arrays; fall back to YAML if optional ROI is missing."""
+    with np.load(npz_path, allow_pickle=False) as cal:
+        print(f"Calibration: {npz_path}")
+        print(f"Available NPZ arrays: {', '.join(cal.files)}")
+        necessary = ('reference_image', 'slope')
+        missing = [name for name in necessary if name not in cal.files]
+        if missing:
+            raise KeyError(f"Calibration file lacks {missing}. Re-run calibrate.py.")
+        reference = np.asarray(cal['reference_image'], dtype=np.float32).copy()
+        slope = np.asarray(cal['slope'], dtype=np.float32).copy()
+        valid = (np.asarray(cal['valid_pixels'], dtype=bool).copy()
+                 if 'valid_pixels' in cal.files else np.ones(reference.shape, dtype=bool))
+        if 'roi' in cal.files:
+            xywh = tuple(int(v) for v in cal['roi'].ravel())
+        elif yaml_roi is not None:
+            print('NPZ has no roi; using calibration.roi from config.yaml')
+            xywh = tuple(int(yaml_roi[k]) for k in ('x', 'y', 'width', 'height'))
+        else:
+            raise ValueError('No ROI in NPZ or config.yaml; provide calibration.roi.')
+        blade_mm = (float(cal['reference_position_mm'])
+                    if 'reference_position_mm' in cal.files else yaml_reference_mm)
+    if reference.ndim != 2 or reference.shape != slope.shape or reference.shape != valid.shape:
+        raise ValueError('reference_image, slope, and valid_pixels must be matching 2D arrays.')
+    if len(xywh) != 4 or reference.shape != (xywh[3], xywh[2]):
+        raise ValueError(f'Calibration shape {reference.shape} differs from ROI (x,y,w,h) {xywh}.')
+    return reference, slope, valid, dict(zip(('x', 'y', 'width', 'height'), xywh)), blade_mm
+
+
+def derive_gradient(heated, reference, slope, saved_valid, n_ambient, geom, settings):
+    """Intensity difference -> equivalent spot shift -> path-averaged dn/dy."""
+    if not (heated.shape == reference.shape == slope.shape == saved_valid.shape):
+        raise ValueError('Heated image and calibration array shapes differ.')
+    f = float(geom['f_eff_m'])
+    L = float(geom['optical_depth_m'])
+    sign = int(geom.get('angle_sign', 1))
+    if f <= 0 or L <= 0 or sign not in (-1, 1):
+        raise ValueError('f_eff_m, optical_depth_m must be positive; angle_sign must be ±1.')
+
+    delta_I = heated.astype(np.float32) - reference
+    min_slope = float(settings.get('min_abs_slope_per_mm', 1e-4))
+    min_light = float(settings.get('min_reference_intensity', 0.002))
+    use_mask = bool(settings.get('use_calibration_mask', True))
+    safe = (np.isfinite(delta_I) & np.isfinite(slope)
+            & (np.abs(slope) >= min_slope) & (reference >= min_light))
+    if use_mask:
+        safe &= saved_valid
+    else:
+        warnings.warn('Calibration validity mask disabled: DIAGNOSTIC MODE, not validated temperatures.')
+
+    # A shift of 1 mm blade position = 1e-3 m. Optical spot shift has opposite sign.
+    spot_m = np.full(reference.shape, np.nan, dtype=np.float32)
+    spot_m[safe] = -1e-3 * delta_I[safe] / slope[safe]
+    gradient = (sign * n_ambient / (f * L)) * spot_m
+
+    sigma = float(settings.get('smooth_sigma_px', 0))
+    if sigma > 0:
+        weights = gaussian_filter(safe.astype(np.float32), sigma)
+        numerator = gaussian_filter(np.where(safe, gradient, 0), sigma)
+        gradient = np.where(weights > 0.5, numerator / np.maximum(weights, 1e-9), np.nan)
+        gradient[~safe] = np.nan
+    return delta_I, spot_m, gradient, safe
+
+
+def integrate_from_bottom(dn_dy, meters_per_pixel, n_ambient, ambient_row):
+    """Integrate each image column UPWARD from a bottom ambient row.
+
+    This setup assumes the recorded image is vertically inverted, so physical
+    upward corresponds to INCREASING image row. Therefore, moving upward in
+    the displayed image (decreasing row) gives dy_phys = -meters_per_pixel.
+
+    The input dn_dy must use the physical vertical-axis sign convention;
+    verify geometry.angle_sign separately against the knife-edge orientation.
+    Invalid gradient pixels interrupt the integration path in that column.
     """
-    if not (heated.shape == reference.shape == slope.shape == valid.shape):
-        raise ValueError("Heated, reference, slope, and valid masks must have identical shapes")
-    if f_eff_m <= 0 or optical_depth_m <= 0:
-        raise ValueError("f_eff_m and optical_depth_m must be positive")
-    if angle_sign not in (-1, 1):
-        raise ValueError("angle_sign must be +1 or -1")
+    h, w = dn_dy.shape
+    if meters_per_pixel <= 0 or not (0 <= ambient_row < h):
+        raise ValueError('Invalid meters_per_pixel or ambient_row.')
 
-    safe = np.isfinite(slope) & (np.abs(slope) > min_abs_slope)
-    delta_I = heated.astype(np.float64) - reference.astype(np.float64)
-    delta_spot_m = np.full(reference.shape, np.nan, dtype=np.float64)
+    out = np.full((h, w), np.nan, dtype=np.float64)
 
-    # slope is brightness/mm; delta_I / slope gives equivalent blade shift in mm.
-    # Convert mm to m, and flip sign to describe the optical spot movement.
-    delta_spot_m[safe] = -1e-3 * delta_I[safe] / slope[safe]
+    # Set n = n_ambient only where the chosen starting row is measurable.
+    anchor_ok = np.isfinite(dn_dy[ambient_row, :])
+    out[ambient_row, anchor_ok] = n_ambient
 
-    theta = angle_sign * delta_spot_m / f_eff_m
-    grad = n_ambient * theta / optical_depth_m
+    # Every column is processed simultaneously, pixel by pixel from bottom to top.
+    for row in range(ambient_row - 1, -1, -1):
+        good = (np.isfinite(out[row + 1, :])
+                & np.isfinite(dn_dy[row + 1, :])
+                & np.isfinite(dn_dy[row, :]))
+        out[row, good] = out[row + 1, good] - (meters_per_pixel / 2) * (
+            dn_dy[row + 1, good] + dn_dy[row, good])
 
-    # Normalized convolution avoids spreading NaN values into valid pixels.
-    if smooth_sigma_px > 0:
-        finite = safe & np.isfinite(grad)
-        weights = gaussian_filter(finite.astype(float), smooth_sigma_px)
-        summed = gaussian_filter(np.where(finite, grad, 0.0), smooth_sigma_px)
-        grad = np.where(weights > 0.1, summed / np.maximum(weights, 1e-9), np.nan)
-
-    # Never report values at pixels that failed calibration.
-    grad[~safe] = np.nan
-    return delta_I, delta_spot_m, grad
+    # Rows below the starting boundary remain NaN: not reconstructed.
+    return out
 
 
-def integrate_from_top(
-    dn_dy: np.ndarray,
-    meters_per_pixel: float,
-    n_ambient: float,
-    ref_top_rows: int,
-) -> np.ndarray:
-    """Integrate dn/dy downward, treating pixel row as negative physical y."""
-    H, W = dn_dy.shape
-    if not 1 <= ref_top_rows < H:
-        raise ValueError("ref_top_rows must be between 1 and H-1")
-    if meters_per_pixel <= 0:
-        raise ValueError("meters_per_pixel must be positive")
-    n_out = np.full((H, W), np.nan, dtype=np.float64)
-    n_out[ref_top_rows - 1] = n_ambient
-
-    for row in range(ref_top_rows, H):
-        a = dn_dy[row - 1]
-        b = dn_dy[row]
-        prev = n_out[row - 1]
-        valid_step = np.isfinite(prev) & np.isfinite(a) & np.isfinite(b)
-        n_out[row] = np.where(
-            valid_step,
-            prev - 0.5 * (a + b) * meters_per_pixel,
-            np.nan,
-        )
-
-    # These rows are assumed ambient boundary conditions, not measurements.
-    n_out[:ref_top_rows] = n_ambient
-    return n_out
+def index_to_temperature(n_field, pressure_pa, K_m3_per_kg, R_air_j_per_kgK):
+    denom = R_air_j_per_kgK * (n_field - 1.0)
+    out = np.full(n_field.shape, np.nan, dtype=np.float64)
+    np.divide(K_m3_per_kg * pressure_pa, denom, out=out,
+              where=np.isfinite(denom) & (denom > 0))
+    return out - 273.15
 
 
-def index_to_temperature(
-    n: np.ndarray,
-    pressure_pa: float,
-    K_m3_kg: float,
-    R_j_kgK: float,
-) -> np.ndarray:
-    """Gladstone-Dale + ideal-gas-law temperature estimate in degrees C."""
-    denom = R_j_kgK * (n - 1.0)
-    T_kelvin = np.divide(
-        K_m3_kg * pressure_pa,
-        denom,
-        out=np.full_like(n, np.nan, dtype=np.float64),
-        where=np.isfinite(denom) & (denom > 0),
-    )
-    return T_kelvin - 273.15
-
-
-def resolve_path(path_value: str, project_dir: Path) -> Path:
-    """Interpret relative paths from the project root (parent of src/)."""
-    p = Path(path_value)
-    return p if p.is_absolute() else (project_dir / p).resolve()
-
-
-def show_and_save_maps(label, reference, heated, delta_I, grad, index, temperature, output_dir):
-    """Six quick diagnostic plots; maps remain in numerical units."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 9), constrained_layout=True)
+def plot_maps(label, reference, heated, delta_I, spot_m, gradient, delta_n, temperature, out_dir):
     panels = [
-        (reference, "Reference intensity", "gray"),
-        (heated, "Heated intensity", "gray"),
-        (delta_I, "Brightness change ΔI", "coolwarm"),
-        (grad, "dn/dy (1/m)", "coolwarm"),
-        (index, "Refractive index n", "viridis"),
-        (temperature, "Estimated temperature (°C)", "inferno"),
+        (reference, 'Reference brightness', 'gray', False),
+        (heated, 'Heated brightness', 'gray', False),
+        (delta_I, 'Brightness difference', 'coolwarm', True),
+        (spot_m * 1e6, 'Spot shift (µm)', 'coolwarm', True),
+        (gradient, 'dn/dy (1/m)', 'coolwarm', True),
+        (delta_n, 'n − n_ambient', 'coolwarm', True),
+        (temperature, 'Estimated temperature (°C)', 'inferno', False),
     ]
-    for ax, (data, title, cmap) in zip(axes.flat, panels):
-        vals = data[np.isfinite(data)]
-        if vals.size:
-            lo, hi = np.percentile(vals, [1, 99])
+    fig, axes = plt.subplots(2, 4, figsize=(18, 9), constrained_layout=True)
+    for ax, item in zip(axes.flat, panels):
+        data, title, cmap, signed = item
+        finite = np.asarray(data)[np.isfinite(data)]
+        ax.set_title(title)
+        ax.axis('off')
+        if not finite.size:
+            ax.text(.5, .5, 'No valid pixels', ha='center', va='center', transform=ax.transAxes)
+            continue
+        if signed:
+            limit = float(np.percentile(np.abs(finite), 95))
+            limit = max(limit, 1e-12)
+            lo, hi = -limit, limit
+        else:
+            lo, hi = np.percentile(finite, (1, 99))
             if hi <= lo:
                 hi = lo + 1e-9
-            im = ax.imshow(data, cmap=cmap, vmin=lo, vmax=hi)
-            fig.colorbar(im, ax=ax, shrink=0.8)
-        else:
-            ax.text(0.5, 0.5, "No valid pixels", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title(title)
-        ax.axis("off")
-    fig.suptitle(f"Schlieren analysis: {label}")
-    fig.savefig(output_dir / f"{label}_maps.png", dpi=150)
+        im = ax.imshow(data, cmap=cmap, vmin=lo, vmax=hi)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    axes.flat[-1].axis('off')
+    fig.suptitle(f'Schlieren diagnostics — {label} (display scaled to percentiles)')
+    fig.savefig(out_dir / f'{label}_maps.png', dpi=130)
     plt.close(fig)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze heated schlieren images")
-    parser.add_argument("--config", type=Path, default=None)
+    parser = argparse.ArgumentParser(description='Analyze heated schlieren images')
+    parser.add_argument('--config', type=Path, default=None)
     args = parser.parse_args()
-
-    # Script and configuration are both inside project_root/src/.
     src_dir = Path(__file__).resolve().parent
     project_dir = src_dir.parent
+    config_path = args.config.resolve() if args.config else src_dir / 'config.yaml'
+    with open(config_path, encoding='utf-8') as f:
+        config = yaml.safe_load(f)
 
-    # An explicit --config path is relative to the terminal's current folder.
-    # Without --config, always read src/config.yaml.
-    config_path = args.config.resolve() if args.config else src_dir / "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = yaml.safe_load(stream)
+    cal_settings = config.get('calibration', {})
+    # Calibration and output paths are project-root relative.
+    cal_path = path_from(cal_settings.get('results_file', 'output/calibration/calibration.npz'), project_dir)
+    reference, slope, saved_valid, roi, blade_mm = load_calibration(
+        cal_path, cal_settings.get('roi'), cal_settings.get('reference_blade_mm'))
+    print(f'ROI: {roi}; reference blade: {blade_mm} mm')
+    print(f'Saved calibration mask accepts {100 * saved_valid.mean():.5f}% of pixels')
 
-    # Do NOT replace project_dir with config_path.parent: that would make
-    # output/calibration and output/analysis resolve inside src/.
+    geom = config['geometry']
+    phys = config['physics']
+    settings = config.get('analysis', {})
+    imgs = config['images']
+    pressure = float(phys['pressure_pa'])
+    temp_ambient_K = float(phys['ambient_temp_C']) + 273.15
+    K = float(phys['K_m3_per_kg'])
+    R = float(phys['R_air_j_per_kgK'])
+    n0 = 1 + K * pressure / (R * temp_ambient_K)
+    ambient_row = int(settings['ambient_row'])  # Bottom ambient row in cropped-image coordinates
+    out_dir = path_from(config.get('output', {}).get('analysis_dir', 'output/analysis'), project_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    cal_path = resolve_path(config.get("calibration", {}).get(
-        "results_file", "output/calibration/calibration.npz"), project_dir)
-    with np.load(cal_path, allow_pickle=False) as cal:
-        required = ("reference_image", "reference_position_mm", "slope", "valid_pixels", "roi")
-        missing = [key for key in required if key not in cal.files]
-        if missing:
-            raise KeyError(f"Missing calibration arrays: {missing}")
-        reference = cal["reference_image"].copy()
-        reference_position_mm = float(cal["reference_position_mm"])
-        slope = cal["slope"].copy()
-        valid = cal["valid_pixels"].copy()
-        saved_roi = tuple(int(v) for v in cal["roi"])
+    for entry in imgs['heated']:
+        label = str(entry['label'])
+        if not label or not all(ch.isalnum() or ch in '-_' for ch in label):
+            raise ValueError(f'Unsafe heated image label {label!r}')
+        # Match calibrate.py: image paths are relative to src/ directory.
+        img_path = path_from(entry['file'], src_dir)
+        print(f'\nAnalyzing {label}: {img_path}')
+        if not img_path.is_file():
+            raise FileNotFoundError(img_path)
+        heated = crop_image(load_image(img_path, jpg_gamma=float(imgs.get('jpg_gamma', 2.2))), roi)
+        delta_I, spot_m, gradient, safe = derive_gradient(
+            heated, reference, slope, saved_valid, n0, geom, settings)
+        n_field = integrate_from_bottom(gradient, float(geom['meters_per_pixel']), n0, ambient_row)
+        temp_C = index_to_temperature(n_field, pressure, K, R)
 
-    # Use the ROI stored in the calibration file, not a potentially changed YAML ROI.
-    roi = dict(zip(("x", "y", "width", "height"), saved_roi))
-    print(f"Loaded calibration: {cal_path}")
-    print(f"Reference blade position: {reference_position_mm:.3f} mm")
-    print(f"Calibration ROI: {roi}")
+        print('Reconstruction diagnostics:')
+        describe('ΔI', delta_I)
+        describe('Optical spot shift (µm)', spot_m * 1e6)
+        describe('dn/dy (1/m)', gradient)
+        describe('n − n_ambient', n_field - n0)
+        describe('Temperature (°C)', temp_C)
+        print(f'  Analysis-safe mask: {100 * safe.mean():.4f}%')
+        if blade_mm is not None and cal_settings.get('reference_blade_mm') is not None:
+            if not np.isclose(float(cal_settings['reference_blade_mm']), blade_mm, atol=1e-6):
+                warnings.warn('YAML reference_blade_mm differs from saved NPZ reference blade. '
+                              'Heated image MUST match the NPZ blade position.')
 
-    valid_fraction = float(np.mean(valid))
-    print(f"Calibration-valid pixels: {100 * valid_fraction:.5f}%")
-    if valid_fraction < 0.05:
-        warnings.warn("Fewer than 5% of calibration pixels are valid. Temperature reconstruction "
-                      "will be mostly unavailable; validate calibration before interpreting maps.")
-
-    geom = config["geometry"]
-    phys = config["physics"]
-    analysis = config["analysis"]
-    image_settings = config["images"]
-
-    P = float(phys["pressure_pa"])
-    T0_K = float(phys["ambient_temp_C"]) + 273.15
-    K = float(phys["K_m3_per_kg"])
-    R = float(phys["R_air_j_per_kgK"])
-    n0 = 1.0 + K * P / (R * T0_K)
-
-    output_dir = resolve_path(config.get("output", {}).get("analysis_dir", "output/analysis"), project_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    jpg_gamma = float(image_settings.get("jpg_gamma", 2.2))
-
-    for entry in image_settings["heated"]:
-        label = str(entry["label"])
-        if not label.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("Heated image labels must consist of letters, digits, - or _")
-        path = resolve_path(entry["file"], src_dir)
-        heated = crop_image(load_image(path, jpg_gamma=jpg_gamma), roi)
-        if heated.shape != reference.shape:
-            raise ValueError(f"Heated image shape {heated.shape} != calibration {reference.shape}")
-
-        delta_I, delta_spot_m, gradient = derive_gradient(
-            heated, reference, slope, valid,
-            f_eff_m=float(geom["f_eff_m"]),
-            optical_depth_m=float(geom["optical_depth_m"]),
-            n_ambient=n0,
-            smooth_sigma_px=float(analysis.get("smooth_sigma_px", 0.0)),
-            angle_sign=int(geom.get("angle_sign", 1)),
-            min_abs_slope=float(analysis.get("min_abs_slope_per_mm", 1e-10)),
-        )
-        n_field = integrate_from_top(
-            gradient,
-            meters_per_pixel=float(geom["meters_per_pixel"]),
-            n_ambient=n0,
-            ref_top_rows=int(analysis["ref_top_rows"]),
-        )
-        temp_C = index_to_temperature(n_field, P, K, R)
-
-        # Save full numerical outputs without costly compression.
-        output_path = output_dir / f"{label}_fields.npz"
-        np.savez(
-            output_path, delta_I=delta_I, delta_spot_m=delta_spot_m,
-            dn_dy=gradient, refractive_index=n_field,
-            temperature_C=temp_C, valid_pixels=valid,
-            roi=np.array(saved_roi), reference_position_mm=reference_position_mm,
-            n_ambient=n0,
-        )
-        show_and_save_maps(label, reference, heated, delta_I, gradient, n_field, temp_C, output_dir)
-        finite_temperature = np.isfinite(temp_C)
-        print(f"[{label}] Saved: {output_path}")
-        print(f"[{label}] Finite reconstructed temperature pixels (including assumed ambient top rows): "
-              f"{100 * finite_temperature.mean():.4f}%")
-        if entry.get("heater_reference_C") is not None:
-            print(f"[{label}] Heater reference: {entry['heater_reference_C']} °C "
-                  "(metadata only; not used in reconstruction)")
+        # Store primary results as float32 to reduce disk size, without compression.
+        outfile = out_dir / f'{label}_fields.npz'
+        np.savez(outfile, delta_I=delta_I.astype(np.float32),
+                 delta_spot_m=spot_m.astype(np.float32),
+                 dn_dy=gradient.astype(np.float32),
+                 refractive_index=n_field.astype(np.float64),
+                 delta_n=(n_field - n0).astype(np.float64),
+                 temperature_C=temp_C.astype(np.float32),
+                 valid_pixels=safe, n_ambient=n0,
+                 roi=np.array([roi[k] for k in ('x','y','width','height')]),
+                 reference_position_mm=np.nan if blade_mm is None else blade_mm)
+        plot_maps(label, reference, heated, delta_I, spot_m, gradient,
+                  n_field - n0, temp_C, out_dir)
+        print(f'Saved {outfile} and {out_dir / (label + "_maps.png")}')
+    print('\nAnalysis complete. Do not interpret temperatures without validating calibration and geometry.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
